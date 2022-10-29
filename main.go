@@ -6,16 +6,20 @@ import (
 	"go/parser"
 	"go/token"
 	"net/url"
+	"sync"
 )
 
 type analyzer struct {
 	fset          *token.FileSet
 	functionCalls map[string]struct{} // doesn't work for methods.
+	functions     []*ast.FuncDecl
+	wg            sync.WaitGroup
 }
 
 // goal of this project is to implement some of the checks from https://staticcheck.io/docs/checks
 // as a proof of concept.
 func (a *analyzer) analyzeCalls(n *ast.CallExpr) {
+	defer a.wg.Done()
 	switch x := n.Fun.(type) {
 	case *ast.SelectorExpr:
 		id, ok := x.X.(*ast.Ident)
@@ -76,12 +80,15 @@ func main() {
 	a := analyzer{
 		fset:          fset,
 		functionCalls: make(map[string]struct{}),
+		functions:     make([]*ast.FuncDecl, 0),
+		wg:            sync.WaitGroup{},
 	}
 
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.CallExpr:
-			a.analyzeCalls(x)
+			a.wg.Add(1)
+			go a.analyzeCalls(x)
 		default:
 		}
 		return true
@@ -90,13 +97,18 @@ func main() {
 	for _, d := range f.Decls {
 		switch x := d.(type) {
 		case *ast.FuncDecl:
-			if x.Name.Name == "main" {
-				continue
-			}
+			a.functions = append(a.functions, x)
+		}
+	}
+	a.wg.Wait()
 
-			if _, ok := a.functionCalls[x.Name.Name]; !ok {
-				fmt.Printf("function %s at %s is unused\n", x.Name.Name, a.fset.Position(x.Pos()))
-			}
+	for _, d := range a.functions {
+		if d.Name.Name == "main" {
+			continue
+		}
+
+		if _, ok := a.functionCalls[d.Name.Name]; !ok {
+			fmt.Printf("function %s at %s is unused\n", d.Name.Name, a.fset.Position(d.Pos()))
 		}
 	}
 }
